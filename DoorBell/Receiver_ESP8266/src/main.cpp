@@ -3,6 +3,7 @@
   - Nhận tín hiệu từ ESP32, bật hai buzzer cùng lúc trong 200ms
   - Nếu nhận liên tiếp, thời gian kêu được reset để kêu liên tục
   - Thêm LED báo kết nối (LED on-board)
+  - Thêm Deep Sleep để tiết kiệm năng lượng
 */
 
 #include <Arduino.h>
@@ -31,12 +32,44 @@ message_t receivedMessage;
 // Đếm số gói tin nhận được
 uint32_t packetCount = 0;
 
+// Deep Sleep variables
+const unsigned long DEEP_SLEEP_TIMEOUT = 30000; // 30 giây không hoạt động thì vào deep sleep
+unsigned long lastActivityTime = 0;
+int bootCount = 0; // Đếm số lần boot (ESP8266 không có RTC_DATA_ATTR như ESP32)
+
+// Wake-up pins
+const int WAKE_PIN = D3; // GPIO0 - có thể dùng để wake từ deep sleep
+
 void updateLED() {
   if (isConnected) {
     digitalWrite(LED_PIN, LOW); // Bật LED (active LOW)
   } else {
     digitalWrite(LED_PIN, HIGH); // Tắt LED
   }
+}
+
+void goToDeepSleep() {
+  Serial.println("\n>>> CHUẨN BỊ VÀO DEEP SLEEP... <<<");
+  Serial.println("Tắt các thiết bị...");
+  
+  // Tắt buzzer nếu đang kêu
+  digitalWrite(BUZZER1_PIN, LOW);
+  digitalWrite(BUZZER2_PIN, LOW);
+  
+  // Tắt LED
+  digitalWrite(LED_PIN, HIGH);
+  
+  // Đợi Serial gửi xong
+  delay(100);
+  
+  Serial.println("Vào Deep Sleep trong 30 giây...");
+  Serial.flush();
+  
+  // Cấu hình wake-up từ timer (30 giây)
+  // ESP8266 deep sleep: thời gian tính bằng micro giây
+  ESP.deepSleep(30 * 1000000); // 30 giây
+  
+  // Code sau đây không chạy vì ESP đã sleep
 }
 
 void OnDataRecv(uint8_t *mac, uint8_t *incomingData, uint8_t len) {
@@ -47,6 +80,7 @@ void OnDataRecv(uint8_t *mac, uint8_t *incomingData, uint8_t len) {
 
     // Cập nhật heartbeat - bất kỳ gói tin nào nhận được cũng chứng tỏ sender còn trong vùng phủ sóng
     lastHeartbeatTime = millis();
+    lastActivityTime = millis(); // Cập nhật thời gian hoạt động
     if (!isConnected) {
       isConnected = true;
       updateLED();
@@ -87,7 +121,17 @@ void setup() {
   Serial.begin(115200);
   delay(1000); // Đợi Serial ổn định
   
+  // Đếm số lần boot
+  bootCount++;
+  
   Serial.println("\n=== ESP8266 RECEIVER ===");
+  Serial.print("Boot count: ");
+  Serial.println(bootCount);
+  
+  // Kiểm tra lý do wake (ESP8266 không có hàm esp_sleep_get_wakeup_cause đơn giản)
+  rst_info *resetInfo = ESP.getResetInfoPtr();
+  Serial.print("Reset reason: ");
+  Serial.println(resetInfo->reason);
   
   pinMode(BUZZER1_PIN, OUTPUT);
   pinMode(BUZZER2_PIN, OUTPUT);
@@ -102,6 +146,14 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
   delay(500);
   digitalWrite(LED_PIN, HIGH);
+  
+  // Test buzzer khi khởi động
+  Serial.println("Test buzzer...");
+  digitalWrite(BUZZER1_PIN, HIGH);
+  digitalWrite(BUZZER2_PIN, HIGH);
+  delay(200);
+  digitalWrite(BUZZER1_PIN, LOW);
+  digitalWrite(BUZZER2_PIN, LOW);
   
   // In địa chỉ MAC của ESP8266
   WiFi.mode(WIFI_STA);
@@ -121,6 +173,7 @@ void setup() {
   Serial.println("Đợi dữ liệu từ ESP32...\n");
   
   lastHeartbeatTime = millis(); // Khởi tạo thời gian
+  lastActivityTime = millis(); // Khởi tạo thời gian hoạt động
 }
 
 void loop() {
@@ -146,5 +199,11 @@ void loop() {
     Serial.printf("Đang chạy... Đã nhận %d gói tin | Kết nối: %s\n", 
                   packetCount, 
                   isConnected ? "CÓ" : "KHÔNG");
+  }
+  
+  // Kiểm tra điều kiện vào deep sleep
+  // Chỉ vào deep sleep khi không có kết nối và không hoạt động
+  if (!isConnected && (millis() - lastActivityTime > DEEP_SLEEP_TIMEOUT)) {
+    goToDeepSleep();
   }
 }
