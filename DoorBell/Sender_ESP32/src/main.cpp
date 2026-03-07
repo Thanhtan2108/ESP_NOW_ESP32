@@ -33,6 +33,11 @@ bool isReceiverConnected = false;
 unsigned long lastAckTime = 0;
 const unsigned long CONNECTION_TIMEOUT = 5000; // 5 giây không nhận được ACK thì coi như mất kết nối
 
+// Deep Sleep variables
+const unsigned long DEEP_SLEEP_TIMEOUT = 30000; // 30 giây không hoạt động thì vào deep sleep
+unsigned long lastActivityTime = 0;
+RTC_DATA_ATTR int bootCount = 0; // Đếm số lần boot (giữ lại qua deep sleep)
+
 void updateLED() {
   if (isReceiverConnected) {
     digitalWrite(LED_PIN, HIGH); // Bật LED (active HIGH trên hầu hết ESP32)
@@ -54,16 +59,49 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
       Serial.println(">>> RECEIVER KẾT NỐI (LED ON) <<<");
     }
     lastAckTime = millis(); // Ghi nhận thời gian gửi thành công cuối cùng
+    lastActivityTime = millis(); // Cập nhật thời gian hoạt động cuối cùng
   } else {
     Serial.println("Thất bại");
   }
 }
 
+void goToDeepSleep() {
+  Serial.println("\n>>> CHUẨN BỊ VÀO DEEP SLEEP... <<<");
+  Serial.println("Tắt các thiết bị...");
+  
+  // Tắt buzzer nếu đang kêu
+  digitalWrite(BUZZER_PIN, LOW);
+  
+  // Tắt LED
+  digitalWrite(LED_PIN, LOW);
+  
+  // Đợi Serial gửi xong
+  delay(100);
+  
+  Serial.println("Vào Deep Sleep trong 30 giây...");
+  Serial.flush();
+  
+  // Cấu hình wake-up source: timer 30 giây
+  esp_sleep_enable_timer_wakeup(30 * 1000000); // 30 giây (tính bằng micro giây)
+  
+  // Cấu hình wake-up từ nút nhấn (GPIO18)
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, LOW); // Wake khi nút nhấn xuống thấp
+  
+  // Vào deep sleep
+  esp_deep_sleep_start();
+}
+
 void setup() {
   Serial.begin(115200);
   delay(100);
-
+  
+  // Đếm số lần boot
+  bootCount++;
   Serial.println("\n=== ESP32 SENDER ===");
+  Serial.print("Boot count: ");
+  Serial.println(bootCount);
+  Serial.print("Lý do wake: ");
+  Serial.println(esp_sleep_get_wakeup_cause());
   
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
@@ -111,10 +149,16 @@ void setup() {
   Serial.println(WiFi.macAddress());
   
   lastAckTime = millis(); // Khởi tạo thời gian
+  lastActivityTime = millis(); // Khởi tạo thời gian hoạt động
 }
 
 void loop() {
   int reading = digitalRead(BUTTON_PIN);
+  
+  // Nếu có hoạt động (nút nhấn thay đổi), cập nhật thời gian
+  if (reading != lastButtonState) {
+    lastActivityTime = millis();
+  }
   
   // Debounce
   if (reading != lastButtonState) {
@@ -144,6 +188,7 @@ void loop() {
         esp_err_t result = esp_now_send(receiverMac, (uint8_t *) &myMessage, sizeof(myMessage));
         if (result == ESP_OK) {
           Serial.println("Đã gửi tín hiệu thành công");
+          lastActivityTime = millis(); // Cập nhật thời gian hoạt động
         } else {
           Serial.println("Lỗi gửi");
         }
@@ -187,5 +232,10 @@ void loop() {
     isReceiverConnected = false;
     updateLED();
     Serial.println(">>> MẤT KẾT NỐI VỚI RECEIVER (LED OFF) <<<");
+  }
+  
+  // Kiểm tra điều kiện vào deep sleep
+  if (millis() - lastActivityTime > DEEP_SLEEP_TIMEOUT) {
+    goToDeepSleep();
   }
 }
